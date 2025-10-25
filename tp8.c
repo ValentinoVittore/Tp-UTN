@@ -119,6 +119,7 @@ float* reservar_memoria(int n) {
     return q;
 }
 
+
 // Punto d)
 void segregar(int (*criterio)(float, float), float valor,
               float *p, int n, float *q) {
@@ -135,9 +136,14 @@ void segregar(int (*criterio)(float, float), float valor,
 
 // Punto e)
 void mostrar_piezas(char *mensaje, float *p, int n) {
+    int i;
+
     printf("Piezas %s:\n", mensaje);
-    for (int i = 0; i < n; i++) {
-        printf("Diametro: %.2f\n", *(p + i));
+
+    if (p != NULL) {
+        for (i = 0; i < n; i++) {
+            printf("Diametro: %.2f\n", *(p + i));
+        }
+        free(p);
     }
 }
-
