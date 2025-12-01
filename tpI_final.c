@@ -1,10 +1,14 @@
+// tpI_final.c
+// Repo: https://github.com/ValentinoVittore/Tp-UTN
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 #include <unistd.h>
 #include <curl/curl.h>
-#include <time.h>
+#include <ctype.h>
+
+#define LOG_FILE "bot_log.txt"
 
 struct memory {
     char *response;
@@ -13,27 +17,21 @@ struct memory {
 
 /* Prototipos */
 static size_t cb(char *data, size_t size, size_t nmemb, void *clientp);
+void init_chunk(struct memory *chunk);
 
-int http_get(const char *url, char **out_response);
-
-int json_get_max_update_id(const char *json, unsigned long long *max_id);
-int json_get_last_chat_id(const char *json, unsigned long long *chat_id);
-int json_get_last_first_name(const char *json, char *out, size_t out_sz);
-int json_get_last_text(const char *json, char *out, size_t out_sz);
-int json_get_last_date(const char *json, long long *unix_time);
-
-int preparar_respuesta(const char *text, const char *nombre,
-                       char *reply, size_t reply_sz);
-int url_encode_spaces(const char *src, char *dst, size_t dst_sz);
-int log_event(FILE *log, long long date, const char *name, const char *msg);
-
-int contiene_subcadena_ci(const char *texto, const char *patron);
-
+int http_get(CURL *curl, struct memory *chunk, const char *url);
 int leer_token_desde_archivo(const char *filename, char *token, size_t token_sz);
+int parse_string_field(const char *json, const char *field_name, char *out, size_t maxlen);
+int parse_long_field(const char *json, const char *field_name, long *value);
+void to_lower_str(char *s);
+void url_encode_spaces(const char *msg, char *out, size_t maxlen);
+int log_event(const char *direction, long unix_time, const char *name, const char *text);
 
-/* Callback de libcurl: acumula respuesta en memoria */
-static size_t cb(char *data, size_t size, size_t nmemb, void *clientp) {
-    size_t realsize = nmemb;
+
+/* Callback de libcurl: acumula respuesta en memoria*/
+static size_t cb(char *data, size_t size, size_t nmemb, void *clientp)
+{
+    size_t realsize = nmemb; /* igual que el código base */
     struct memory *mem = (struct memory *)clientp;
 
     char *ptr = realloc(mem->response, mem->size + realsize + 1);
@@ -49,321 +47,51 @@ static size_t cb(char *data, size_t size, size_t nmemb, void *clientp) {
     return realsize;
 }
 
-/* Realiza un GET HTTP y devuelve el JSON en *out_response (malloc). */
-int http_get(const char *url, char **out_response) {
-    CURL *curl;
-    CURLcode res;
-    struct memory chunk = {0};
+// inicialización a cero de todos los campos
+// struct memory chunk = {0};
+void init_chunk(struct memory *chunk)
+{
+    chunk->response = NULL;
+    chunk->size = 0;
+}
 
-    if (url == NULL || out_response == NULL) {
+/* GET HTTP usando CURL ya inicializado */
+int http_get(CURL *curl, struct memory *chunk, const char *url)
+{
+    CURLcode res;
+
+    if (curl == NULL || chunk == NULL || url == NULL) {
         printf("Error: puntero nulo en http_get\n");
         return 1;
     }
 
-    curl = curl_easy_init();
-    if (!curl) {
-        printf("Error: no se pudo inicializar CURL\n");
-        return 1;
-    }
+    init_chunk(chunk);
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)chunk);
 
     res = curl_easy_perform(curl);
     if (res != CURLE_OK) {
         printf("Error: fallo la solicitud HTTP. Código: %d\n", res);
-        curl_easy_cleanup(curl);
-        free(chunk.response);
-        return 1;
-    }
-
-    curl_easy_cleanup(curl);
-
-    *out_response = chunk.response; /* el caller debe hacer free */
-    return 0;
-}
-
-/* Obtiene el máximo update_id del JSON */
-int json_get_max_update_id(const char *json, unsigned long long *max_id) {
-    const char *p;
-    unsigned long long tmp = 0;
-    int found = 0;
-
-    if (json == NULL || max_id == NULL) {
-        printf("Error: puntero nulo en json_get_max_update_id\n");
-        return 1;
-    }
-
-    p = json;
-    while ((p = strstr(p, "\"update_id\":")) != NULL) {
-        unsigned long long uid;
-
-        p += strlen("\"update_id\":");
-        uid = strtoull(p, NULL, 10);
-        if (!found || uid > tmp) {
-            tmp = uid;
-            found = 1;
+        if (chunk->response != NULL) {
+            free(chunk->response);
+            chunk->response = NULL;
         }
-    }
-
-    if (!found) {
-        /* No es un error grave: simplemente no hay mensajes nuevos */
         return 1;
     }
 
-    *max_id = tmp;
-    return 0;
-}
-
-/* Obtiene el chat.id del último mensaje */
-int json_get_last_chat_id(const char *json, unsigned long long *chat_id) {
-    const char *p;
-    const char *last_chat = NULL;
-
-    if (json == NULL || chat_id == NULL) {
-        printf("Error: puntero nulo en json_get_last_chat_id\n");
+    if (chunk->response == NULL) {
+        printf("Error: respuesta vacía desde el servidor\n");
         return 1;
     }
-
-    p = json;
-    while ((p = strstr(p, "\"chat\"")) != NULL) {
-        last_chat = p;
-        p += strlen("\"chat\"");
-    }
-
-    if (last_chat == NULL) {
-        printf("Error: no se encontró 'chat' en JSON\n");
-        return 1;
-    }
-
-    p = strstr(last_chat, "\"id\":");
-    if (p == NULL) {
-        printf("Error: no se encontró 'id' dentro de 'chat'\n");
-        return 1;
-    }
-
-    p += strlen("\"id\":");
-    *chat_id = strtoull(p, NULL, 10);
-
-    return 0;
-}
-
-/* Obtiene chat.first_name del último mensaje */
-int json_get_last_first_name(const char *json, char *out, size_t out_sz) {
-    const char *p;
-    const char *last_chat = NULL;
-    size_t i = 0;
-
-    if (json == NULL || out == NULL || out_sz == 0) {
-        printf("Error: puntero nulo en json_get_last_first_name\n");
-        return 1;
-    }
-
-    p = json;
-    while ((p = strstr(p, "\"chat\"")) != NULL) {
-        last_chat = p;
-        p += strlen("\"chat\"");
-    }
-
-    if (last_chat == NULL) {
-        printf("Error: no se encontró 'chat' en JSON\n");
-        return 1;
-    }
-
-    p = strstr(last_chat, "\"first_name\":\"");
-    if (p == NULL) {
-        printf("Error: no se encontró 'first_name' dentro de 'chat'\n");
-        return 1;
-    }
-
-    p += strlen("\"first_name\":\"");
-
-    while (*p != '"' && *p != '\0' && i + 1 < out_sz) {
-        out[i++] = *p;
-        p++;
-    }
-    out[i] = '\0';
-
-    if (i == 0) {
-        printf("Error: 'first_name' vacío\n");
-        return 1;
-    }
-
-    return 0;
-}
-
-/* Obtiene el texto del último mensaje */
-int json_get_last_text(const char *json, char *out, size_t out_sz) {
-    const char *p;
-    const char *last_text = NULL;
-    size_t i = 0;
-
-    if (json == NULL || out == NULL || out_sz == 0) {
-        printf("Error: puntero nulo en json_get_last_text\n");
-        return 1;
-    }
-
-    p = json;
-    while ((p = strstr(p, "\"text\"")) != NULL) {
-        last_text = p;
-        p += strlen("\"text\"");
-    }
-
-    if (last_text == NULL) {
-        printf("Error: no se encontró 'text' en JSON\n");
-        return 1;
-    }
-
-    p = strstr(last_text, "\"text\":\"");
-    if (p == NULL) {
-        printf("Error: formato de 'text' inválido\n");
-        return 1;
-    }
-
-    p += strlen("\"text\":\"");
-
-    while (*p != '"' && *p != '\0' && i + 1 < out_sz) {
-        out[i++] = *p;
-        p++;
-    }
-    out[i] = '\0';
-
-    if (i == 0) {
-        printf("Advertencia: texto vacío en mensaje\n");
-    }
-
-    return 0;
-}
-
-/* Obtiene el campo date (unix time) del último mensaje */
-int json_get_last_date(const char *json, long long *unix_time) {
-    const char *p;
-    long long tmp = 0;
-    int found = 0;
-
-    if (json == NULL || unix_time == NULL) {
-        printf("Error: puntero nulo en json_get_last_date\n");
-        return 1;
-    }
-
-    p = json;
-    while ((p = strstr(p, "\"date\":")) != NULL) {
-        long long d;
-        p += strlen("\"date\":");
-        d = atoll(p);
-        tmp = d;
-        found = 1;
-    }
-
-    if (!found) {
-        printf("Error: no se encontró 'date' en JSON\n");
-        return 1;
-    }
-
-    *unix_time = tmp;
-    return 0;
-}
-
-/* Busca si 'patron' aparece dentro de 'texto' sin distinguir mayúsculas/minúsculas */
-int contiene_subcadena_ci(const char *texto, const char *patron) {
-    size_t len_patron;
-    const char *p;
-
-    if (texto == NULL || patron == NULL) {
-        return 0;
-    }
-
-    len_patron = strlen(patron);
-    if (len_patron == 0) {
-        return 0;
-    }
-
-    p = texto;
-    while (*p != '\0') {
-        if (strncasecmp(p, patron, len_patron) == 0) {
-            return 1;
-        }
-        p++;
-    }
-
-    return 0;
-}
-
-/* Prepara el texto de respuesta según saludo recibido */
-int preparar_respuesta(const char *text, const char *nombre,
-                       char *reply, size_t reply_sz) {
-    if (text == NULL || nombre == NULL || reply == NULL || reply_sz == 0) {
-        printf("Error: puntero nulo en preparar_respuesta\n");
-        return 1;
-    }
-
-    reply[0] = '\0';
-
-    if (contiene_subcadena_ci(text, "hola")) {
-        snprintf(reply, reply_sz, "Hola, %s", nombre);
-    } else if (contiene_subcadena_ci(text, "chau")) {
-        snprintf(reply, reply_sz, "Chau, %s", nombre);
-    } else {
-        /* No es un saludo reconocido: no respondemos */
-        reply[0] = '\0';
-    }
-
-    return 0;
-}
-
-/* Reemplaza espacios por %20 (URL encode mínimo) */
-int url_encode_spaces(const char *src, char *dst, size_t dst_sz) {
-    size_t i = 0, j = 0;
-
-    if (src == NULL || dst == NULL || dst_sz == 0) {
-        printf("Error: puntero nulo en url_encode_spaces\n");
-        return 1;
-    }
-
-    while (src[i] != '\0') {
-        if (src[i] == ' ') {
-            if (j + 3 >= dst_sz) {
-                printf("Error: buffer insuficiente en url_encode_spaces\n");
-                return 1;
-            }
-            dst[j++] = '%';
-            dst[j++] = '2';
-            dst[j++] = '0';
-        } else {
-            if (j + 1 >= dst_sz) {
-                printf("Error: buffer insuficiente en url_encode_spaces\n");
-                return 1;
-            }
-            dst[j++] = src[i];
-        }
-        i++;
-    }
-
-    if (j >= dst_sz) {
-        printf("Error: buffer insuficiente al terminar url_encode_spaces\n");
-        return 1;
-    }
-
-    dst[j] = '\0';
-    return 0;
-}
-
-/* Registra mensaje en archivo de log */
-int log_event(FILE *log, long long date, const char *name, const char *msg) {
-    if (log == NULL || name == NULL || msg == NULL) {
-        printf("Error: puntero nulo en log_event\n");
-        return 1;
-    }
-
-    fprintf(log, "%lld;%s;%s\n", date, name, msg);
-    fflush(log);
 
     return 0;
 }
 
 /* Lee el token desde un archivo (primera línea) */
-int leer_token_desde_archivo(const char *filename, char *token, size_t token_sz) {
+int leer_token_desde_archivo(const char *filename, char *token, size_t token_sz)
+{
     FILE *fPtr;
     char *nl;
 
@@ -399,10 +127,162 @@ int leer_token_desde_archivo(const char *filename, char *token, size_t token_sz)
     return 0;
 }
 
-int main(int argc, char *argv[]) {
+/* Parsea un campo string del JSON: "campo": "valor" */
+int parse_string_field(const char *json, const char *field_name, char *out, size_t maxlen)
+{
+    char pattern[128];
+    const char *p;
+    size_t i = 0;
+
+    if (json == NULL || field_name == NULL || out == NULL || maxlen == 0) {
+        printf("Error: puntero nulo en parse_string_field\n");
+        return 1;
+    }
+
+    /* Siempre dejamos algo coherente en out */
+    out[0] = '\0';
+
+    snprintf(pattern, sizeof(pattern), "\"%s\"", field_name);
+
+    p = strstr(json, pattern);
+    if (!p) {
+        /* CASO ESPECIAL: si el campo es "text" y no existe,
+           lo tomamos como "no hay texto" (foto/audio/etc.),*/
+        if (strcmp(field_name, "text") == 0) {
+            /* out ya quedó como "" */
+            /* Info opcional, podés comentar este printf si molesta */
+            printf("Info: mensaje sin campo 'text' (foto/audio/etc.), se ignora.\n");
+            return 0;  /* OK, pero sin texto */
+        }
+
+        /* Para el resto de campos seguimos considerándolo error */
+        printf("Error: no se encontró campo '%s' en JSON\n", field_name);
+        return 1;
+    }
+
+    p = strchr(p, ':');
+    if (!p) {
+        printf("Error: formato inválido para campo '%s'\n", field_name);
+        return 1;
+    }
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+
+    if (*p != '\"') {
+        printf("Error: campo '%s' no es string\n", field_name);
+        return 1;
+    }
+    p++; /* saltar la comilla inicial */
+
+    while (*p && *p != '\"' && i < maxlen - 1) {
+        if (*p == '\\' && p[1] != '\0') {
+            p++; /* saltear el backslash */
+        }
+        out[i++] = *p++;
+    }
+    out[i] = '\0';
+
+    if (i == 0) {
+        printf("Advertencia: campo string '%s' vacío\n", field_name);
+    }
+
+    return 0;
+}
+
+
+/* Parsea un campo numérico entero: "campo": 12345 */
+int parse_long_field(const char *json, const char *field_name, long *value)
+{
+    char pattern[128];
+    const char *p;
+
+    if (json == NULL || field_name == NULL || value == NULL) {
+        printf("Error: puntero nulo en parse_long_field\n");
+        return 1;
+    }
+
+    snprintf(pattern, sizeof(pattern), "\"%s\"", field_name);
+
+    p = strstr(json, pattern);
+    if (!p) {
+        printf("Error: no se encontró campo '%s' en JSON\n", field_name);
+        return 1;
+    }
+
+    p = strchr(p, ':');
+    if (!p) {
+        printf("Error: formato inválido para campo '%s'\n", field_name);
+        return 1;
+    }
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+
+    *value = strtol(p, NULL, 10);
+    return 0;
+}
+
+/* Convierte string a minúsculas in-place */
+void to_lower_str(char *s)
+{
+    while (*s) {
+        *s = (char)tolower((unsigned char)*s);
+        s++;
+    }
+}
+
+/* Codifica espacios como %20 (suficiente para el TP; trunca si no entra) */
+void url_encode_spaces(const char *msg, char *out, size_t maxlen)
+{
+    size_t j = 0;
+    size_t i;
+
+    if (msg == NULL || out == NULL || maxlen == 0) {
+        return;
+    }
+
+    for (i = 0; msg[i] != '\0' && j < maxlen - 1; i++) {
+        if (msg[i] == ' ') {
+            if (j + 3 >= maxlen) {
+                break; /* no hay lugar, se trunca */
+            }
+            out[j++] = '%';
+            out[j++] = '2';
+            out[j++] = '0';
+        } else {
+            out[j++] = msg[i];
+        }
+    }
+    out[j] = '\0';
+}
+
+/* Loguea mensajes IN/OUT en archivo de texto */
+int log_event(const char *direction, long unix_time, const char *name, const char *text)
+{
+    FILE *f;
+
+    if (direction == NULL) direction = "-";
+    if (name == NULL) name = "-";
+    if (text == NULL) text = "-";
+
+    f = fopen(LOG_FILE, "a");
+    if (f == NULL) {
+        printf("Error: no se pudo abrir '%s' para log\n", LOG_FILE);
+        return 1;
+    }
+
+    fprintf(f, "%s;%ld;%s;%s\n", direction, unix_time, name, text);
+    fclose(f);
+
+    return 0;
+}
+
+int main(int argc, char *argv[])
+{
     char token[256];
-    unsigned long long offset = 0;
-    FILE *log_file;
+    char base_url[512];
+    CURL *curl;
+    struct memory chunk;
+    long offset_update_id = -1; /* -1: sin offset aún */
 
     if (argc != 2) {
         printf("Uso: %s token.txt\n", argv[0]);
@@ -413,140 +293,156 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    log_file = fopen("bot_log.txt", "a");
-    if (log_file == NULL) {
-        printf("Error: no se pudo abrir 'bot_log.txt' para escritura\n");
+    snprintf(base_url, sizeof(base_url), "https://api.telegram.org/bot%s", token);
+
+    curl = curl_easy_init();
+    if (!curl) {
+        printf("Error: no se pudo inicializar CURL\n");
         return 1;
     }
 
+    printf("Bot iniciado. Esperando mensajes...\n");
+
     while (1) {
-        char url[1024];
-        char *json_resp = NULL;
+        char url_get[1024];
 
-        if (offset > 0) {
-            snprintf(url, sizeof(url),
-                     "https://api.telegram.org/bot%s/getUpdates?offset=%llu",
-                     token, offset);
+        if (offset_update_id >= 0) {
+            snprintf(url_get, sizeof(url_get),
+                     "%s/getUpdates?offset=%ld", base_url, offset_update_id);
         } else {
-            snprintf(url, sizeof(url),
-                     "https://api.telegram.org/bot%s/getUpdates",
-                     token);
+            snprintf(url_get, sizeof(url_get),
+                     "%s/getUpdates", base_url);
         }
 
-        if (http_get(url, &json_resp) != 0) {
-            fclose(log_file);
-            return 1;
-        }
-
-        if (strstr(json_resp, "\"ok\":false") != NULL) {
-            printf("Error: respuesta de Telegram indica fallo:\n%s\n", json_resp);
-            free(json_resp);
-            fclose(log_file);
-            return 1;
-        }
-
-        if (strstr(json_resp, "\"result\": []") != NULL ||
-            strstr(json_resp, "\"result\":[]") != NULL ||
-            strstr(json_resp, "\"update_id\":") == NULL) {
-            free(json_resp);
+        if (http_get(curl, &chunk, url_get) != 0) {
+            printf("Fallo en getUpdates\n");
             sleep(2);
             continue;
         }
 
-        {
-            unsigned long long max_update_id;
-            unsigned long long chat_id;
-            char first_name[128];
-            char text[512];
-            long long date_unix;
-            char reply[512];
-            char reply_encoded[1024];
-            char url_send[1024];
-            char *json_send = NULL;
-
-            if (json_get_max_update_id(json_resp, &max_update_id) != 0) {
-                free(json_resp);
-                sleep(2);
-                continue;
-            }
-
-            if (json_get_last_chat_id(json_resp, &chat_id) != 0) {
-                free(json_resp);
-                fclose(log_file);
-                return 1;
-            }
-
-            if (json_get_last_first_name(json_resp, first_name,
-                                         sizeof(first_name)) != 0) {
-                free(json_resp);
-                fclose(log_file);
-                return 1;
-            }
-
-            if (json_get_last_text(json_resp, text, sizeof(text)) != 0) {
-                free(json_resp);
-                fclose(log_file);
-                return 1;
-            }
-
-            if (json_get_last_date(json_resp, &date_unix) != 0) {
-                free(json_resp);
-                fclose(log_file);
-                return 1;
-            }
-
-            if (log_event(log_file, date_unix, first_name, text) != 0) {
-                free(json_resp);
-                fclose(log_file);
-                return 1;
-            }
-
-            if (preparar_respuesta(text, first_name,
-                                   reply, sizeof(reply)) != 0) {
-                free(json_resp);
-                fclose(log_file);
-                return 1;
-            }
-
-            if (reply[0] != '\0') {
-                if (url_encode_spaces(reply, reply_encoded,
-                                      sizeof(reply_encoded)) != 0) {
-                    free(json_resp);
-                    fclose(log_file);
-                    return 1;
-                }
-
-                snprintf(url_send, sizeof(url_send),
-                         "https://api.telegram.org/bot%s/sendMessage?chat_id=%llu&text=%s",
-                         token, chat_id, reply_encoded);
-
-                if (http_get(url_send, &json_send) != 0) {
-                    free(json_resp);
-                    fclose(log_file);
-                    return 1;
-                }
-
-                {
-                    long long now = (long long)time(NULL);
-                    if (log_event(log_file, now, "BOT", reply) != 0) {
-                        free(json_resp);
-                        free(json_send);
-                        fclose(log_file);
-                        return 1;
-                    }
-                }
-
-                free(json_send);
-            }
-
-            offset = max_update_id + 1ULL;
+        /* Error general de la API */
+        if (strstr(chunk.response, "\"ok\":false") != NULL) {
+            printf("Error: la API de Telegram devolvió fallo:\n%s\n", chunk.response);
+            free(chunk.response);
+            chunk.response = NULL;
+            sleep(2);
+            continue;
         }
 
-        free(json_resp);
+        /* Sin mensajes nuevos */
+        if (strstr(chunk.response, "\"result\": []") != NULL ||
+            strstr(chunk.response, "\"result\":[]") != NULL) {
+            free(chunk.response);
+            chunk.response = NULL;
+            sleep(2);
+            continue;
+        }
+
+        /* Procesamos el primer mensaje de result (estilo Código 1) */
+
+        /* update_id */
+        long update_id = 0;
+        if (parse_long_field(chunk.response, "update_id", &update_id) != 0) {
+            free(chunk.response);
+            chunk.response = NULL;
+            sleep(2);
+            continue;
+        }
+
+        /* Sección "message" */
+        char *p_message = strstr(chunk.response, "\"message\"");
+        if (!p_message) {
+            printf("Error: no se encontró 'message' en JSON\n");
+            free(chunk.response);
+            chunk.response = NULL;
+            /* Marcamos igual como leído para no trabarnos */
+            offset_update_id = update_id + 1;
+            sleep(2);
+            continue;
+        }
+
+        long chat_id = 0;
+        long msg_date = 0;
+        char first_name[128] = "";
+        char text[512] = "";
+
+        /* Dentro de message, buscamos chat */
+        char *p_chat = strstr(p_message, "\"chat\"");
+        if (p_chat) {
+            /* chat.id */
+            if (parse_long_field(p_chat, "id", &chat_id) != 0) {
+                chat_id = 0;
+            }
+            /* chat.first_name */
+            if (parse_string_field(p_chat, "first_name", first_name, sizeof(first_name)) != 0) {
+                first_name[0] = '\0';
+            }
+        }
+
+        /* message.date */
+        if (parse_long_field(p_message, "date", &msg_date) != 0) {
+            msg_date = 0;
+        }
+
+        /* message.text */
+        if (parse_string_field(p_message, "text", text, sizeof(text)) != 0) {
+            text[0] = '\0';
+        }
+
+        /* Log IN: mensaje recibido */
+        log_event("IN", msg_date, first_name, text);
+
+        /* Decidir respuesta (hola/chau) */
+        char respuesta[512] = "";
+        if (text[0] != '\0') {
+            char texto_lower[512];
+            strncpy(texto_lower, text, sizeof(texto_lower) - 1);
+            texto_lower[sizeof(texto_lower) - 1] = '\0';
+            to_lower_str(texto_lower);
+
+            if (strstr(texto_lower, "hola") != NULL) {
+                snprintf(respuesta, sizeof(respuesta),
+                         "Hola, %s", first_name[0] ? first_name : "usuario");
+            } else if (strstr(texto_lower, "chau") != NULL) {
+                snprintf(respuesta, sizeof(respuesta),
+                         "Chau %s, que tengas buen día!",
+                         first_name[0] ? first_name : "");
+            }
+        }
+
+        if (respuesta[0] != '\0' && chat_id != 0) {
+            char respuesta_codificada[1024];
+            char url_send[2048];
+            struct memory chunk_send;
+
+            url_encode_spaces(respuesta, respuesta_codificada,
+                              sizeof(respuesta_codificada));
+
+            snprintf(url_send, sizeof(url_send),
+                     "%s/sendMessage?chat_id=%ld&text=%s",
+                     base_url, chat_id, respuesta_codificada);
+
+            if (http_get(curl, &chunk_send, url_send) == 0) {
+                /* Log OUT: usamos la misma fecha del mensaje (como Código 1) */
+                log_event("OUT", msg_date, "BOT", respuesta);
+                free(chunk_send.response);
+            } else {
+                printf("Error: no se pudo enviar la respuesta\n");
+            }
+        }
+
+        /* Actualizamos offset: marcamos este mensaje como leído */
+        offset_update_id = update_id + 1;
+
+        if (chunk.response != NULL) {
+            free(chunk.response);
+            chunk.response = NULL;
+        }
+
         sleep(2);
     }
 
-    /* No se llega aquí normalmente */
-    /* fclose(log_file); */
-    /* return 0; */
+    /* En la práctica no se llega aquí */
+    curl_easy_cleanup(curl);
+    return 0;
 }
