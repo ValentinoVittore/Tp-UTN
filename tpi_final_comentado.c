@@ -1,5 +1,5 @@
 // tpI_final.c
-// Repo: https://github.com/ValentinoVittore/Tp-UTN
+// Repo: https://github.com/ValentinoVittore/Tp-UTN/blob/main/tpi_final_comentado-c
 //
 // Este programa implementa un bot de Telegram en C.
 // La idea general es:
