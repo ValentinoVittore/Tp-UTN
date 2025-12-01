@@ -1,3 +1,6 @@
+//cd "/c/Users/Usuario/Desktop/TP Integrador"
+//gcc tpI_final.c -o tpI_final -lcurl
+
 // tpI_final.c
 // Repo: https://github.com/ValentinoVittore/Tp-UTN/blob/main/tpi_final_comentado-c
 //
