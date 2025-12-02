@@ -89,7 +89,7 @@ int http_get(CURL *curl, struct memory *chunk, const char *url)
     return 0;
 }
 
-/* Lee el token desde un archivo (primera línea) */
+/* Lee el token desde un archivo */
 int leer_token_desde_archivo(const char *filename, char *token, size_t token_sz)
 {
     FILE *fPtr;
@@ -230,7 +230,7 @@ void to_lower_str(char *s)
     }
 }
 
-/* Codifica espacios como %20 (suficiente para el TP; trunca si no entra) */
+/* Codifica espacios como %20 */
 void url_encode_spaces(const char *msg, char *out, size_t maxlen)
 {
     size_t j = 0;
@@ -320,7 +320,7 @@ int main(int argc, char *argv[])
             continue;
         }
 
-        /* Error general de la API */
+        /* Error general */
         if (strstr(chunk.response, "\"ok\":false") != NULL) {
             printf("Error: la API de Telegram devolvió fallo:\n%s\n", chunk.response);
             free(chunk.response);
@@ -338,7 +338,7 @@ int main(int argc, char *argv[])
             continue;
         }
 
-        /* Procesamos el primer mensaje de result (estilo Código 1) */
+        /* Procesamos el primer mensaje de result */
 
         /* update_id */
         long update_id = 0;
@@ -423,7 +423,7 @@ int main(int argc, char *argv[])
                      base_url, chat_id, respuesta_codificada);
 
             if (http_get(curl, &chunk_send, url_send) == 0) {
-                /* Log OUT: usamos la misma fecha del mensaje (como Código 1) */
+                /* Log OUT: usamos la misma fecha del mensaje */
                 log_event("OUT", msg_date, "BOT", respuesta);
                 free(chunk_send.response);
             } else {
